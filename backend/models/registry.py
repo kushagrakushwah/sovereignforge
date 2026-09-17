@@ -31,6 +31,7 @@ class ModelRegistry:
         prompt: str | list[dict],
         system: str = None,
         use_cache: bool = True,
+        json_mode: bool = True,
     ) -> str:
         """
         Call a text/reasoning model and return the full response.
@@ -41,18 +42,21 @@ class ModelRegistry:
                         ({"role": "user"|"assistant", "content": ...})
             system:     Optional system prompt
             use_cache:  If True (default), check the semantic cache before calling Ollama.
+            json_mode:  If True (default), ask Ollama to constrain output to valid JSON.
+                        Every current caller (agent loop, extract) parses JSON.
 
         Returns:
             Full response string from the model.
         """
         messages = _build_messages(prompt, system)
         cache_key = _cache_key(messages)
+        cache_ns = model_key if json_mode else f"{model_key}:text"
         if use_cache:
-            cached = _semantic_cache.get(model_key, cache_key)
+            cached = _semantic_cache.get(cache_ns, cache_key)
             if cached is not None:
                 return cached
 
-        payload = self._chat_payload(model_key, messages, stream=False)
+        payload = self._chat_payload(model_key, messages, stream=False, json_mode=json_mode)
 
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
@@ -60,7 +64,7 @@ class ModelRegistry:
             response = resp.json()["message"]["content"]
 
         if use_cache:
-            _semantic_cache.put(model_key, cache_key, response)
+            _semantic_cache.put(cache_ns, cache_key, response)
 
         return response
 
@@ -70,6 +74,7 @@ class ModelRegistry:
         prompt: str | list[dict],
         system: str = None,
         use_cache: bool = True,
+        json_mode: bool = True,
     ):
         """
         Streaming version of generate() — yields text chunks as they arrive from Ollama.
@@ -83,13 +88,14 @@ class ModelRegistry:
         """
         messages = _build_messages(prompt, system)
         cache_key = _cache_key(messages)
+        cache_ns = model_key if json_mode else f"{model_key}:text"
         if use_cache:
-            cached = _semantic_cache.get(model_key, cache_key)
+            cached = _semantic_cache.get(cache_ns, cache_key)
             if cached is not None:
                 yield cached
                 return
 
-        payload = self._chat_payload(model_key, messages, stream=True)
+        payload = self._chat_payload(model_key, messages, stream=True, json_mode=json_mode)
         chunks: list[str] = []
         completed = False
 
@@ -116,7 +122,7 @@ class ModelRegistry:
                         break
 
         if use_cache and completed:
-            _semantic_cache.put(model_key, cache_key, "".join(chunks))
+            _semantic_cache.put(cache_ns, cache_key, "".join(chunks))
 
     async def generate_vision(self, prompt: str, image_path: str) -> str:
         """
@@ -150,13 +156,18 @@ class ModelRegistry:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    def _chat_payload(self, model_key: str, messages: list[dict], stream: bool) -> dict:
-        return {
+    def _chat_payload(
+        self, model_key: str, messages: list[dict], stream: bool, json_mode: bool = False,
+    ) -> dict:
+        payload = {
             "model": self._resolve_model(model_key),
             "messages": messages,
             "stream": stream,
             "options": {"num_ctx": OLLAMA_NUM_CTX},
         }
+        if json_mode:
+            payload["format"] = "json"
+        return payload
 
     def _resolve_model(self, model_key: str) -> str:
         """Return model name string for the given key."""

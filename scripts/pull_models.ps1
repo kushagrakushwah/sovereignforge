@@ -7,8 +7,8 @@ Write-Host ""
 
 $models = @(
     # Quantized versions for 6-8GB VRAM
-    "qwen2.5:7b-instruct-q4_K_M",      # reasoning/document
-    "qwen2.5-coder:7b-instruct-q4_K_M", # coding
+    "qwen2.5:7b",                      # reasoning/document (Q4_K_M build)
+    "qwen2.5-coder:7b",                # coding (Q4_K_M build)
     "qwen2.5vl:7b"                       # vision (multimodal)
 )
 

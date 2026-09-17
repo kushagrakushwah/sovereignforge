@@ -119,6 +119,7 @@ class TestRegistryChat:
         path, body = fake.requests[0]
         assert path == "/api/chat"
         assert body["options"]["num_ctx"] == OLLAMA_NUM_CTX
+        assert body["format"] == "json"
         assert body["messages"] == [
             {"role": "system", "content": "SYS"},
             {"role": "user", "content": "hi"},
@@ -134,6 +135,7 @@ class TestRegistryChat:
                 "reasoning", conversation, system="SYS", use_cache=False)]
 
         assert "".join(chunks) == "hello world"
+        assert fake.requests[0][1]["format"] == "json"
         assert conversation == [{"role": "user", "content": "q"}]
         assert fake.requests[0][1]["messages"][0]["role"] == "system"
 
@@ -176,9 +178,22 @@ class TestRegistryChat:
         path, body = fake.requests[0]
         assert path == "/api/chat"
         assert body["options"]["num_ctx"] == OLLAMA_NUM_CTX
+        assert "format" not in body          # vision answers are free text
         msg = body["messages"][0]
         assert msg["content"] == "what?"
         assert len(msg["images"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_text_mode_opt_out_and_separate_cache(self, fresh_cache):
+        from models.registry import registry
+        fake = _FakeOllama(reply="plain prose")
+        with patch("models.registry.httpx.AsyncClient", fake.client_factory()):
+            await registry.generate("reasoning", "same prompt", json_mode=True)
+            await registry.generate("reasoning", "same prompt", json_mode=False)
+
+        assert "format" in fake.requests[0][1]
+        assert "format" not in fake.requests[1][1]
+        assert len(fake.requests) == 2      # JSON answer not reused for text mode
 
     def test_cache_key_is_readable_and_role_aware(self):
         from models.registry import _cache_key

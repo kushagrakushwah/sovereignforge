@@ -21,9 +21,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 MODELS = {
-    # Use quantized versions for 6–8 GB VRAM
-    "reasoning": os.getenv("MODEL_REASONING", "qwen2.5:7b-instruct-q4_K_M"),
-    "coding":    os.getenv("MODEL_CODING",    "qwen2.5-coder:7b-instruct-q4_K_M"),
+    # Use the standard 7b tags that we just pulled via ollama
+    "reasoning": os.getenv("MODEL_REASONING", "qwen2.5:7b"),
+    "coding":    os.getenv("MODEL_CODING",    "qwen2.5-coder:7b"),
     "vision":    os.getenv("MODEL_VISION",    "qwen2.5vl:7b"),
 }
 

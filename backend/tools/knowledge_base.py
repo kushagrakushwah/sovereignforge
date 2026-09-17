@@ -245,19 +245,23 @@ def search_knowledge_base(
         top = scored[:n_results]
 
         RELEVANCE_THRESHOLD = 0.20  # raised from 0.15 — filters out noise
-        results = [
-            {
-                "score": round(hybrid_score, 4),
-                "dense_score": round(dense_score, 4),
-                "bm25_score": round(bm25_norm, 4),
-                "text": doc["text"],
-                "source": doc["source"],
-                "doc_type": doc.get("doc_type", "unknown"),
-                "chunk_index": doc.get("chunk_index", 0),
-            }
-            for hybrid_score, dense_score, bm25_norm, doc in top
-            if hybrid_score > RELEVANCE_THRESHOLD
-        ]
+        import re
+        results = []
+        for hybrid_score, dense_score, bm25_norm, doc in top:
+            if hybrid_score > RELEVANCE_THRESHOLD:
+                # Sanitize text to prevent repeating character hallucination in LLMs
+                clean_text = re.sub(r'[\u2550\u2500-\u257F]{4,}', '', doc["text"]) # Strip unicode box drawing lines
+                clean_text = re.sub(r'[-=_*#]{5,}', '', clean_text) # Strip long dash/equals lines
+                
+                results.append({
+                    "score": round(hybrid_score, 4),
+                    "dense_score": round(dense_score, 4),
+                    "bm25_score": round(bm25_norm, 4),
+                    "text": clean_text.strip(),
+                    "source": doc["source"],
+                    "doc_type": doc.get("doc_type", "unknown"),
+                    "chunk_index": doc.get("chunk_index", 0),
+                })
 
         # ── No-match guardrail ────────────────────────────────────────────────
         if not results:
@@ -313,7 +317,7 @@ def clear_knowledge_base() -> Dict[str, Any]:
 
 # ── Async wrappers for agent tool dispatch ───────────────────────────────────
 
-async def run_search_kb(query: str, n_results: int = 5) -> Dict[str, Any]:
+async def run_search_kb(query: str, n_results: int = 2) -> Dict[str, Any]:
     """Agent-callable async wrapper for KB search."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, search_knowledge_base, query, n_results)
