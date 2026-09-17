@@ -288,7 +288,7 @@ def clear_knowledge_base() -> Dict[str, Any]:
 
 # ── Async wrappers for agent tool dispatch ───────────────────────────────────
 
-async def run_search_kb(query: str, n_results: int = 5) -> Dict[str, Any]:
+async def run_search_kb(query: str, n_results: int = 2) -> Dict[str, Any]:
     """Agent-callable async wrapper for KB search."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, search_knowledge_base, query, n_results)

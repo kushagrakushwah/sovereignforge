@@ -51,6 +51,7 @@ class ModelRegistry:
             "model": model_name,
             "messages": messages,
             "stream": False,
+            "format": "json",
             "options": {
                 "num_ctx": 8192
             }
@@ -90,6 +91,7 @@ class ModelRegistry:
             "model": model_name,
             "messages": messages,
             "stream": True,
+            "format": "json",
             "options": {
                 "num_ctx": 8192
             }
