@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
 import pytest
 
+from conftest import make_llm_stream
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Fixtures
@@ -246,6 +248,67 @@ print(result)
         print(f"\n✅ Pipeline B: Fibonacci → {result['stdout'].strip()}")
 
 
+class TestSandboxLifecycle:
+    """Real-Docker checks that the sandbox never leaks containers."""
+
+    @pytest.fixture
+    def docker_client(self):
+        try:
+            import docker
+            client = docker.from_env()
+            client.ping()
+            client.images.get("sovereignforge-sandbox:latest")
+        except Exception as e:
+            pytest.skip(f"Docker or sandbox image not available: {e}")
+        return client
+
+    @staticmethod
+    def _sandbox_containers(client):
+        return client.containers.list(all=True, filters={"ancestor": "sovereignforge-sandbox:latest"})
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_and_removes_container(self, docker_client):
+        from tools.code_sandbox import run_code_sandbox
+        before = {c.id for c in self._sandbox_containers(docker_client)}
+
+        with patch("tools.code_sandbox.SANDBOX_TIMEOUT", 3):
+            result = await asyncio.wait_for(
+                run_code_sandbox("print('started', flush=True)\nwhile True: pass"), timeout=60,
+            )
+
+        assert result["timed_out"] is True
+        assert result["success"] is False
+        assert "started" in result["stdout"]
+        leftover = {c.id for c in self._sandbox_containers(docker_client)} - before
+        assert leftover == set()
+
+    @pytest.mark.asyncio
+    async def test_stdout_and_stderr_are_separate(self, docker_client):
+        from tools.code_sandbox import run_code_sandbox
+        result = await run_code_sandbox(
+            "import sys\nprint('to stdout')\nprint('to stderr', file=sys.stderr)\nsys.exit(3)"
+        )
+        assert result["exit_code"] == 3
+        assert result["success"] is False
+        assert result["stdout"].strip() == "to stdout"
+        assert result["stderr"].strip() == "to stderr"
+
+    @pytest.mark.asyncio
+    async def test_exception_traceback_in_stderr(self, docker_client):
+        from tools.code_sandbox import run_code_sandbox
+        result = await run_code_sandbox("raise ValueError('boom')")
+        assert result["success"] is False
+        assert "ValueError: boom" in result["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_memory_limit_is_reported(self, docker_client):
+        from tools.code_sandbox import run_code_sandbox
+        result = await run_code_sandbox("x = bytearray(1024 * 1024 * 1024)")
+        assert result["success"] is False
+        assert result["exit_code"] != 0
+        assert "memory" in result["stderr"].lower()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Pipeline C: Multimodal Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,15 +383,6 @@ class TestFullAgentPipelines:
         # Step 3: finish
         finish_call = '{"thought": "Task complete", "action": "finish", "action_input": {"answer": "I have extracted findings and drafted the Word document.", "artifacts": []}, "observation": null}'
 
-        responses = [extract_call, draft_call, finish_call]
-        call_index = 0
-
-        async def mock_generate(*args, **kwargs):
-            nonlocal call_index
-            response = responses[min(call_index, len(responses) - 1)]
-            call_index += 1
-            return response
-
         mock_extract_result = {
             "success": True,
             "summary": "Electrical report.",
@@ -337,24 +391,32 @@ class TestFullAgentPipelines:
             "recommendations": ["Rec 1"],
             "raw_json": {},
         }
+        mock_extract = AsyncMock(return_value=mock_extract_result)
 
-        with patch("agent.loop.registry") as mock_registry:
-            mock_registry.generate = mock_generate
-            with patch("agent.loop.run_extract", AsyncMock(return_value=mock_extract_result)):
-                events = []
-                async for event in run_agent(
-                    user_input="Extract findings from this document",
-                    task_type="document",
-                    model_key="reasoning",
-                ):
-                    events.append(event)
+        with patch("agent.loop.registry") as mock_registry, \
+             patch.dict("agent.loop.TOOLS", {"extract": mock_extract}):
+            mock_registry.generate_stream = make_llm_stream([extract_call, draft_call, finish_call])
+            events = []
+            async for event in run_agent(
+                user_input="Extract findings from this document",
+                task_type="document",
+                model_key="reasoning",
+            ):
+                events.append(event)
 
-        event_types = [e.type for e in events]
-        assert "finish" in event_types or "tool_call" in event_types
+        tool_calls = [e.data["tool"] for e in events if e.type == "tool_call"]
+        assert tool_calls == ["extract", "draft_word"]
+        mock_extract.assert_awaited_once()
 
-        finish_events = [e for e in events if e.type == "finish"]
-        if finish_events:
-            print(f"\n✅ Full Document Pipeline: {finish_events[0].data['answer'][:80]}")
+        # draft_word ran for real and produced a .docx
+        draft_result = next(e for e in events if e.type == "tool_result" and e.data["tool"] == "draft_word")
+        assert draft_result.data["success"] is True
+        generated = draft_result.data["result"]["file_path"]
+        assert os.path.exists(generated)
+        os.unlink(generated)
+
+        assert events[-1].type == "finish"
+        print(f"\n✅ Full Document Pipeline: {events[-1].data['answer'][:80]}")
 
     @pytest.mark.asyncio
     async def test_coding_agent_pipeline(self, sample_python_code):
@@ -366,15 +428,6 @@ class TestFullAgentPipelines:
         sandbox_call = f'{{"thought": "I will execute this code", "action": "code_sandbox", "action_input": {{"code": "print(42)", "language": "python"}}, "observation": null}}'
         finish_call = '{"thought": "Code executed successfully", "action": "finish", "action_input": {"answer": "The code runs and outputs 42.", "artifacts": []}, "observation": null}'
 
-        responses = [sandbox_call, finish_call]
-        call_index = 0
-
-        async def mock_generate(*args, **kwargs):
-            nonlocal call_index
-            response = responses[min(call_index, len(responses) - 1)]
-            call_index += 1
-            return response
-
         mock_sandbox_result = {
             "success": True,
             "stdout": "42\n",
@@ -382,21 +435,21 @@ class TestFullAgentPipelines:
             "exit_code": 0,
             "timed_out": False,
         }
+        mock_sandbox = AsyncMock(return_value=mock_sandbox_result)
 
-        with patch("agent.loop.registry") as mock_registry:
-            mock_registry.generate = mock_generate
-            with patch("agent.loop.run_code_sandbox", AsyncMock(return_value=mock_sandbox_result)):
-                events = []
-                async for event in run_agent(
-                    user_input="Run this Python code: print(42)",
-                    task_type="coding",
-                    model_key="coding",
-                ):
-                    events.append(event)
+        with patch("agent.loop.registry") as mock_registry, \
+             patch.dict("agent.loop.TOOLS", {"code_sandbox": mock_sandbox}):
+            mock_registry.generate_stream = make_llm_stream([sandbox_call, finish_call])
+            events = []
+            async for event in run_agent(
+                user_input="Run this Python code: print(42)",
+                task_type="coding",
+                model_key="coding",
+            ):
+                events.append(event)
 
-        event_types = [e.type for e in events]
-        assert "tool_call" in event_types or "finish" in event_types
-
-        finish_events = [e for e in events if e.type == "finish"]
-        if finish_events:
-            print(f"\n✅ Full Coding Pipeline: {finish_events[0].data['answer']}")
+        mock_sandbox.assert_awaited_once_with(code="print(42)", language="python")
+        result = next(e for e in events if e.type == "tool_result")
+        assert result.data["result"]["stdout"] == "42\n"
+        assert events[-1].type == "finish"
+        print(f"\n✅ Full Coding Pipeline: {events[-1].data['answer']}")

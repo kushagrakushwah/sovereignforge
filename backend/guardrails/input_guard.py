@@ -51,11 +51,8 @@ _PATH_TRAVERSAL: list[re.Pattern] = [
 ]
 
 # ── Allowed root directories for file tool arguments ──────────────────────────
-import tempfile as _tempfile
-_TEMP_BASE = Path(_tempfile.gettempdir()) / "sovereignforge"
-_ALLOWED_PREFIXES: list[str] = [
-    str(_TEMP_BASE),
-]
+# Defined in config.py (TEMP_BASE plus anything listed in SF_ALLOWED_PATHS).
+from config import ALLOWED_FILE_ROOTS
 
 
 class GuardViolation(Exception):
@@ -121,16 +118,20 @@ def check_tool_args(tool_name: str, action_input: dict) -> None:
                     f"Path traversal attempt detected in tool '{tool_name}'.",
                     category="path_traversal",
                 )
-        # Must be inside an allowed directory
+        # Must be inside an allowed directory. resolve(strict=False) works for
+        # paths that don't exist yet; an unresolvable path is rejected.
         try:
-            resolved = str(Path(fp).resolve())
-            if not any(resolved.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
-                raise GuardViolation(
-                    f"File path outside allowed directories in tool '{tool_name}': {Path(fp).name}",
-                    category="path_traversal",
-                )
-        except (OSError, ValueError):
-            pass  # path doesn't exist yet — allow (e.g. output files about to be created)
+            resolved = Path(fp).resolve()
+        except (OSError, ValueError, RuntimeError):
+            raise GuardViolation(
+                f"Unresolvable file path in tool '{tool_name}'.",
+                category="path_traversal",
+            )
+        if not any(resolved.is_relative_to(root) for root in ALLOWED_FILE_ROOTS):
+            raise GuardViolation(
+                f"File path outside allowed directories in tool '{tool_name}': {resolved.name}",
+                category="path_traversal",
+            )
 
 
 def check_artifacts(artifacts: list, output_dir: str) -> list[str]:

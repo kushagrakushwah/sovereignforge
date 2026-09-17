@@ -3,12 +3,13 @@ import json
 import httpx
 import base64
 import sys
-import os
 from pathlib import Path
 
 # Allow running from backend/ directory directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import OLLAMA_BASE_URL, MODELS, MODELS_FALLBACK, LLM_TIMEOUT_SECONDS
+from config import (
+    OLLAMA_BASE_URL, OLLAMA_NUM_CTX, MODELS, MODELS_FALLBACK, LLM_TIMEOUT_SECONDS,
+)
 from cache.semantic_cache import cache as _semantic_cache
 
 
@@ -16,6 +17,7 @@ class ModelRegistry:
     """
     Central client for all Ollama model calls.
     Never call Ollama directly from tools — always go through this registry.
+    All calls use Ollama's /api/chat so the model's own chat template is applied.
     """
 
     def __init__(self):
@@ -28,43 +30,35 @@ class ModelRegistry:
         model_key: str,
         prompt: str | list[dict],
         system: str = None,
-        stream: bool = False,
         use_cache: bool = True,
     ) -> str:
-        cache_key = f"{model_key}:{system or ''}:{prompt}"
+        """
+        Call a text/reasoning model and return the full response.
+
+        Args:
+            model_key:  "reasoning" | "coding" | "vision"
+            prompt:     A single user prompt, or a list of chat messages
+                        ({"role": "user"|"assistant", "content": ...})
+            system:     Optional system prompt
+            use_cache:  If True (default), check the semantic cache before calling Ollama.
+
+        Returns:
+            Full response string from the model.
+        """
+        messages = _build_messages(prompt, system)
+        cache_key = _cache_key(messages)
         if use_cache:
             cached = _semantic_cache.get(model_key, cache_key)
             if cached is not None:
                 return cached
 
-        model_name = self._resolve_model(model_key)
-
-        if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
-        else:
-            messages = prompt.copy()
-
-        if system:
-            messages.insert(0, {"role": "system", "content": system})
-
-        payload: dict = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "num_ctx": 8192
-            }
-        }
+        payload = self._chat_payload(model_key, messages, stream=False)
 
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-            )
+            resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             response = resp.json()["message"]["content"]
 
-        # ── Store in semantic cache ────────────────────────────────────────────
         if use_cache:
             _semantic_cache.put(model_key, cache_key, response)
 
@@ -75,25 +69,29 @@ class ModelRegistry:
         model_key: str,
         prompt: str | list[dict],
         system: str = None,
+        use_cache: bool = True,
     ):
-        model_name = self._resolve_model(model_key)
+        """
+        Streaming version of generate() — yields text chunks as they arrive from Ollama.
+        Used by the agent loop to emit token_chunk WebSocket events for a live typewriter effect.
 
-        if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
-        else:
-            messages = prompt.copy()
+        On a cache hit the cached response is yielded as a single chunk. A fully
+        streamed response is stored in the cache; an interrupted one is not.
 
-        if system:
-            messages.insert(0, {"role": "system", "content": system})
+        Yields:
+            str: Each text chunk from the streaming Ollama response.
+        """
+        messages = _build_messages(prompt, system)
+        cache_key = _cache_key(messages)
+        if use_cache:
+            cached = _semantic_cache.get(model_key, cache_key)
+            if cached is not None:
+                yield cached
+                return
 
-        payload: dict = {
-            "model": model_name,
-            "messages": messages,
-            "stream": True,
-            "options": {
-                "num_ctx": 8192
-            }
-        }
+        payload = self._chat_payload(model_key, messages, stream=True)
+        chunks: list[str] = []
+        completed = False
 
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
             async with client.stream(
@@ -107,13 +105,18 @@ class ModelRegistry:
                         continue
                     try:
                         chunk_data = json.loads(line)
-                        token = chunk_data.get("message", {}).get("content", "")
-                        if token:
-                            yield token
-                        if chunk_data.get("done", False):
-                            break
-                    except Exception:
+                    except json.JSONDecodeError:
                         continue
+                    token = chunk_data.get("message", {}).get("content", "")
+                    if token:
+                        chunks.append(token)
+                        yield token
+                    if chunk_data.get("done", False):
+                        completed = True
+                        break
+
+        if use_cache and completed:
+            _semantic_cache.put(model_key, cache_key, "".join(chunks))
 
     async def generate_vision(self, prompt: str, image_path: str) -> str:
         """
@@ -129,20 +132,13 @@ class ModelRegistry:
         with open(image_path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode()
 
-        payload: dict = {
-            "model": self._resolve_model("vision"),
-            "prompt": prompt,
-            "images": [image_b64],
-            "stream": False,
-        }
+        messages = [{"role": "user", "content": prompt, "images": [image_b64]}]
+        payload = self._chat_payload("vision", messages, stream=False)
 
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-            )
+            resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
-            return resp.json()["response"]
+            return resp.json()["message"]["content"]
 
     async def health_check(self) -> dict:
         """Return list of locally available Ollama models."""
@@ -154,6 +150,14 @@ class ModelRegistry:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
+    def _chat_payload(self, model_key: str, messages: list[dict], stream: bool) -> dict:
+        return {
+            "model": self._resolve_model(model_key),
+            "messages": messages,
+            "stream": stream,
+            "options": {"num_ctx": OLLAMA_NUM_CTX},
+        }
+
     def _resolve_model(self, model_key: str) -> str:
         """Return model name string for the given key."""
         if model_key not in self.models:
@@ -164,6 +168,28 @@ class ModelRegistry:
     def get_cache_stats(self) -> dict:
         """Return semantic cache statistics."""
         return _semantic_cache.stats()
+
+
+def _build_messages(prompt: str | list[dict], system: str | None) -> list[dict]:
+    """Normalise a prompt into an Ollama chat message list (never mutates the input)."""
+    if isinstance(prompt, str):
+        messages = [{"role": "user", "content": prompt}]
+    else:
+        messages = [dict(m) for m in prompt]
+    if system:
+        messages.insert(0, {"role": "system", "content": system})
+    return messages
+
+
+def _cache_key(messages: list[dict]) -> str:
+    """
+    Readable, deterministic cache key for a message list.
+    A lone user message is keyed by its bare text so short prompts stay
+    eligible for semantic matching.
+    """
+    if len(messages) == 1:
+        return messages[0]["content"]
+    return "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
 
 # ── Singleton — import this from everywhere ──

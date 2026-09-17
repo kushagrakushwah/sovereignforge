@@ -18,7 +18,8 @@ import tempfile
 LOG_FILE = os.path.join(tempfile.gettempdir(), "sovereignforge", "network.log")
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
+# "ollama" is the docker-compose service name; it only resolves inside the stack network.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal", "ollama"}
 
 
 class SovereigntyMonitor:
@@ -28,8 +29,15 @@ class SovereigntyMonitor:
             f.write("")
         print(f"[SovereignForge] Sovereignty monitor active. Log: {LOG_FILE}")
 
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        """Called for HTTPS CONNECT tunnels, before any TLS handshake."""
+        self._check(flow)
+
     def request(self, flow: http.HTTPFlow) -> None:
-        """Called for every outbound HTTP/HTTPS request."""
+        """Called for every outbound plain-HTTP request."""
+        self._check(flow)
+
+    def _check(self, flow: http.HTTPFlow) -> None:
         host = flow.request.host
         is_local = self._is_local(host)
 
@@ -47,7 +55,7 @@ class SovereigntyMonitor:
         if not is_local:
             flow.response = http.Response.make(
                 403,
-                b"BLOCKED: SovereignForge sovereignty monitor — no external calls allowed",
+                b"BLOCKED: SovereignForge sovereignty monitor - no external calls allowed",
                 {"Content-Type": "text/plain"},
             )
             print(f"[BLOCKED] {flow.request.method} {host}")
@@ -62,7 +70,9 @@ class SovereigntyMonitor:
             pass
 
     def _is_local(self, host: str) -> bool:
-        return any(h in host for h in LOCAL_HOSTS)
+        # Exact match only: a substring test would let "localhost.attacker.com"
+        # or "127.0.0.1.nip.io" through as local.
+        return host.strip("[]").rstrip(".").lower() in LOCAL_HOSTS
 
 
 addons = [SovereigntyMonitor()]

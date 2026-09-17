@@ -9,8 +9,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# CPU-only torch: compose gives this container no GPU, and the default CUDA
+# wheels (pulled in by sentence-transformers) add several GB.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake the embedding model into the image. At runtime all outbound traffic
+# goes through the sovereignty proxy, so it could not be downloaded then.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 COPY . .
 

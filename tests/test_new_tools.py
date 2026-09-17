@@ -352,6 +352,8 @@ class TestFixtures:
         text = code.read_text(encoding="utf-8")
         assert "ASME" in text
         assert "def calculate_pipe_wall_thickness" in text
+        # The sandbox demo runs this file, so it must at least be valid Python
+        compile(text, str(code), "exec")
 
     def test_pid_diagram_exists(self):
         pid = self.FIXTURE_DIR / "sample_pid_diagram.png"

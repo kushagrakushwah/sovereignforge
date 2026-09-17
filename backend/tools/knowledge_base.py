@@ -17,12 +17,11 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import tempfile
+import math
 
-TEMP_DIR = Path(tempfile.gettempdir())
+from config import KB_DIR
 
 # KB storage path
-KB_DIR = os.path.join(TEMP_DIR, "sovereignforge", "knowledge_base")
 KB_INDEX_FILE = os.path.join(KB_DIR, "index.pkl")
 KB_DOCS_FILE  = os.path.join(KB_DIR, "documents.json")
 
@@ -56,10 +55,35 @@ def _cosine_similarity(a, b):
     return float(np.dot(a, b) / denom)
 
 
-def _bm25_score(query_tokens: list[str], doc_tokens: list[str], avg_doc_len: float, k1: float = 1.5, b: float = 0.75) -> float:
+def _bm25_idf(corpus_tokens: list[list[str]]) -> dict[str, float]:
+    """
+    BM25 inverse document frequency for every term in the corpus.
+    Uses the non-negative variant: ln(1 + (N - df + 0.5) / (df + 0.5)).
+    """
+    n_docs = len(corpus_tokens)
+    doc_freq: dict[str, int] = {}
+    for tokens in corpus_tokens:
+        for token in set(tokens):
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+    return {
+        token: math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+        for token, df in doc_freq.items()
+    }
+
+
+def _bm25_score(
+    query_tokens: list[str],
+    doc_tokens: list[str],
+    avg_doc_len: float,
+    k1: float = 1.5,
+    b: float = 0.75,
+    idf: dict[str, float] | None = None,
+) -> float:
     """
     Pure-Python BM25 score for keyword relevance.
     No external library needed — implements the standard BM25 formula.
+    Pass `idf` from _bm25_idf() so rare terms outweigh common ones;
+    without it every term is weighted 1.0.
     """
     score = 0.0
     doc_len = len(doc_tokens)
@@ -71,10 +95,10 @@ def _bm25_score(query_tokens: list[str], doc_tokens: list[str], avg_doc_len: flo
         if token not in doc_freq:
             continue
         tf = doc_freq[token]
-        idf = 1.0  # simplified IDF (1.0 per matching term)
+        term_idf = idf.get(token, 0.0) if idf is not None else 1.0
         numerator = tf * (k1 + 1)
         denominator = tf + k1 * (1 - b + b * doc_len / max(avg_doc_len, 1))
-        score += idf * numerator / max(denominator, 1e-9)
+        score += term_idf * numerator / max(denominator, 1e-9)
     return score
 
 
@@ -193,10 +217,11 @@ def search_knowledge_base(
         query_tokens = query.lower().split()
         all_doc_tokens = [doc["text"].lower().split() for doc in documents]
         avg_doc_len = sum(len(t) for t in all_doc_tokens) / max(len(all_doc_tokens), 1)
+        idf = _bm25_idf(all_doc_tokens)
 
         # Get max BM25 score for normalization
         bm25_scores_raw = [
-            _bm25_score(query_tokens, tokens, avg_doc_len)
+            _bm25_score(query_tokens, tokens, avg_doc_len, idf=idf)
             for tokens in all_doc_tokens
         ]
         max_bm25 = max(bm25_scores_raw) if bm25_scores_raw else 1.0

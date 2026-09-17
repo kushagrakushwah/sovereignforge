@@ -86,7 +86,7 @@ def print_report(result):
     print("  MRPL - CDU Unit 4 - Crude Feed Line")
     print("=" * 60)
     print(f"  Design Pressure      : {result['design_pressure_bar']} bar ({result['design_pressure_MPa']} MPa)")
-    print(f"  Outer Diameter       : {result['outer_diameter_mm']} mm (6" NPS)")
+    print(f"  Outer Diameter       : {result['outer_diameter_mm']} mm (6-inch NPS)")
     print(f"  Allowable Stress     : {result['allowable_stress_MPa']} MPa @ 350degC")
     print(f"  Quality Factor (E)   : {result['quality_factor_E']}")
     print(f"  Y Coefficient        : {result['Y_coefficient']}")

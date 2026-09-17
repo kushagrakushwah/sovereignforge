@@ -27,8 +27,9 @@ numpy
 # PDF fixture generation (for demo files)
 fpdf2
 
-# File utilities
+# File utilities (python-multipart is required by FastAPI for UploadFile endpoints)
 aiofiles
+python-multipart
 
 # Testing
 pytest
@@ -37,5 +38,5 @@ pytest-asyncio
 # Docker SDK (for sandbox)
 docker
 
-# mitmproxy (sovereignty monitor — can run separately)
-mitmproxy
+# mitmproxy is not needed here: docker-compose runs it as its own container.
+# For local dev (scripts/start_dev.ps1) install requirements-dev.txt instead.

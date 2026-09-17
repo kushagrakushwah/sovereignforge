@@ -30,11 +30,10 @@ from tools.draft_excel import run_draft_excel
 from tools.code_sandbox import run_code_sandbox
 from tools.image_understand import run_image_understand
 from tools.knowledge_base import run_search_kb, run_ingest_file
-from config import MAX_AGENT_ITERATIONS
+from config import MAX_AGENT_ITERATIONS, OUTPUT_DIR
 from schemas import AgentEvent
 import time
 from guardrails.input_guard import check_tool_args, check_artifacts, GuardViolation
-from config import OUTPUT_DIR
 
 # ── Tool dispatch table ──
 TOOLS: dict = {
@@ -234,16 +233,6 @@ async def run_agent(
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _build_prompt(conversation: list[dict]) -> str:
-    """Flatten conversation history into a single prompt string."""
-    parts = []
-    for msg in conversation:
-        role = msg["role"].upper()
-        parts.append(f"{role}: {msg['content']}")
-    parts.append("ASSISTANT:")
-    return "\n\n".join(parts)
-
 
 def _parse_llm_response(raw: str) -> dict | None:
     """

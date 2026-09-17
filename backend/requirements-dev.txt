@@ -1,0 +1,4 @@
+# Local development: backend deps + the mitmproxy sovereignty monitor,
+# which scripts/start_dev.ps1 runs from the same venv.
+-r requirements.txt
+mitmproxy

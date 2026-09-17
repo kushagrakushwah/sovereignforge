@@ -221,8 +221,14 @@ OLLAMA_BASE_URL=http://localhost:11434
 MODEL_REASONING=qwen2.5:7b
 MODEL_CODING=qwen2.5-coder:7b
 MODEL_VISION=qwen2.5vl:7b
+OLLAMA_NUM_CTX=8192          # context window sent with every Ollama call
 TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+SF_ALLOWED_PATHS=D:\SOPs     # extra dirs agent tools may read (os.pathsep-separated)
 ```
+
+By default agent tools may only touch files under `<tempdir>/sovereignforge`
+(uploads, outputs, knowledge base). Use `SF_ALLOWED_PATHS` to let the agent
+ingest an existing document library.
 
 ---
 

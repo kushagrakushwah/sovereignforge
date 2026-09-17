@@ -62,7 +62,7 @@ if (-not (Test-Path $venvPython)) {
 
 # Install deps if needed
 Write-Host "Installing/verifying backend dependencies..." -ForegroundColor Yellow
-& $venvPython -m pip install -q -r .\backend\requirements.txt
+& $venvPython -m pip install -q -r .\backend\requirements-dev.txt
 Write-Host "[OK] Backend deps ready" -ForegroundColor Green
 
 # ── Start mitmproxy in background ──

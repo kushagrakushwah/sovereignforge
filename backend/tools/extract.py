@@ -15,9 +15,6 @@ EXTRACT_SYSTEM_PROMPT = (
     "No preamble, no explanation, no markdown fences."
 )
 
-# Max chars to send to LLM to stay within context window
-MAX_TEXT_LENGTH = 6000
-
 WINDOW_SIZE = 5000    # chars per window
 WINDOW_OVERLAP = 500  # overlap between windows
 
@@ -112,8 +109,7 @@ async def run_extract(
     """
     # ── Single window (short document) ───────────────────────────────────────
     if len(raw_text) <= WINDOW_SIZE:
-        truncated = raw_text
-        prompt = _build_extract_prompt(truncated, extraction_goal)
+        prompt = _build_extract_prompt(raw_text, extraction_goal)
         try:
             response = await registry.generate("reasoning", prompt, system=EXTRACT_SYSTEM_PROMPT)
         except Exception as exc:

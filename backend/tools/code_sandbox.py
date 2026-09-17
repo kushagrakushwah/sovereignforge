@@ -6,7 +6,7 @@ Security model:
   - Memory capped at 256MB
   - CPU capped at 0.5 cores
   - Read-only filesystem (code injected via volume mount)
-  - Container auto-deleted after run
+  - Container killed at the timeout and always deleted
   - Hard 30-second timeout
 """
 import sys
@@ -27,6 +27,7 @@ from config import (
 
 try:
     import docker
+    import requests  # installed with the docker SDK
     DOCKER_AVAILABLE = True
 except ImportError:
     DOCKER_AVAILABLE = False
@@ -63,17 +64,19 @@ async def run_code_sandbox(code: str, language: str = "python") -> dict:
         with open(code_file, "w", encoding="utf-8") as f:
             f.write(code)
 
+        # _run_container enforces SANDBOX_TIMEOUT itself and kills the container;
+        # this outer timeout is only a backstop in case the Docker daemon hangs.
         loop = asyncio.get_event_loop()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _run_container, tmp_dir),
-                timeout=SANDBOX_TIMEOUT,
+                timeout=SANDBOX_TIMEOUT + 30,
             )
         except asyncio.TimeoutError:
             return {
                 "success": False,
                 "stdout": "",
-                "stderr": f"Execution timed out after {SANDBOX_TIMEOUT} seconds",
+                "stderr": "Docker daemon did not respond in time",
                 "exit_code": -1,
                 "timed_out": True,
             }
@@ -84,7 +87,12 @@ async def run_code_sandbox(code: str, language: str = "python") -> dict:
 
 
 def _run_container(tmp_dir: str) -> dict:
-    """Synchronous Docker run — called in thread executor."""
+    """
+    Synchronous Docker run — called in thread executor.
+    Runs detached so a runaway program can be killed at SANDBOX_TIMEOUT; the
+    container is always removed, whatever happens.
+    """
+    container = None
     try:
         client = docker.from_env()
 
@@ -101,30 +109,32 @@ def _run_container(tmp_dir: str) -> dict:
             nano_cpus=SANDBOX_CPU_QUOTA,
             read_only=True,
             tmpfs={"/tmp": "size=64m"},
-            remove=True,                 # auto-delete after run
-            detach=False,
-            stdout=True,
-            stderr=True,
+            detach=True,
         )
 
-        # When detach=False, .run() returns bytes (combined stdout+stderr)
-        output = container.decode("utf-8", errors="replace") if container else ""
+        try:
+            status = container.wait(timeout=SANDBOX_TIMEOUT)
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
+            container.kill()
+            return {
+                "success": False,
+                "stdout": _logs(container, stdout=True),
+                "stderr": f"Execution timed out after {SANDBOX_TIMEOUT} seconds",
+                "exit_code": -1,
+                "timed_out": True,
+            }
+
+        exit_code = status.get("StatusCode", -1)
+        stderr = _logs(container, stdout=False)
+        container.reload()
+        if container.attrs.get("State", {}).get("OOMKilled"):
+            stderr = (stderr + f"\nKilled: exceeded the {SANDBOX_MEMORY_LIMIT} memory limit").strip()
 
         return {
-            "success": True,
-            "stdout": output,
-            "stderr": "",
-            "exit_code": 0,
-            "timed_out": False,
-        }
-
-    except docker.errors.ContainerError as exc:
-        # Code executed but returned non-zero exit code (e.g. syntax error)
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": getattr(exc, "stderr", b"").decode("utf-8", errors="replace") if hasattr(exc, "stderr") and getattr(exc, "stderr", None) else str(exc),
-            "exit_code": exc.exit_status,
+            "success": exit_code == 0,
+            "stdout": _logs(container, stdout=True),
+            "stderr": stderr,
+            "exit_code": exit_code,
             "timed_out": False,
         }
 
@@ -135,14 +145,18 @@ def _run_container(tmp_dir: str) -> dict:
         )
 
     except Exception as exc:
-        timed_out = "timeout" in str(exc).lower() or "timed out" in str(exc).lower()
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": str(exc),
-            "exit_code": -1,
-            "timed_out": timed_out,
-        }
+        return _failure(str(exc))
+
+    finally:
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+
+
+def _logs(container, stdout: bool) -> str:
+    return container.logs(stdout=stdout, stderr=not stdout).decode("utf-8", errors="replace")
 
 
 def _failure(message: str) -> dict:

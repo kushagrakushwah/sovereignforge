@@ -27,6 +27,10 @@ MODELS = {
     "vision":    os.getenv("MODEL_VISION",    "qwen2.5vl:7b"),
 }
 
+# Context window passed to Ollama. Ollama's default (2048) silently truncates
+# the ReAct conversation once OCR text and KB hits accumulate.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+
 # Fallback model names (if quantized not available)
 MODELS_FALLBACK = {
     "reasoning": "qwen2.5:7b",
@@ -67,5 +71,16 @@ LLM_TIMEOUT_SECONDS = 600   # Increased to 10 minutes for large context processi
 KB_DIR = str(TEMP_BASE / "knowledge_base")
 os.makedirs(KB_DIR, exist_ok=True)
 
+# ── Guardrails ──
+# Roots that agent tools may read from / write to. TEMP_BASE covers uploads,
+# outputs and the KB. Extra roots (e.g. an SOP library) can be added with
+# SF_ALLOWED_PATHS, separated by os.pathsep (":" on Linux, ";" on Windows).
+ALLOWED_FILE_ROOTS = [str(TEMP_BASE.resolve())] + [
+    str(Path(p).resolve())
+    for p in os.getenv("SF_ALLOWED_PATHS", "").split(os.pathsep)
+    if p.strip()
+]
+
 # ── Allowed local hosts (sovereignty check) ──
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
+# "ollama" is the docker-compose service name; it only resolves inside the stack network.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal", "ollama"}

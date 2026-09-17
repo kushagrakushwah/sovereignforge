@@ -8,6 +8,11 @@ RUN npm ci --only=production
 
 # Build
 FROM base AS builder
+# NEXT_PUBLIC_* are inlined into the client bundle at build time
+ARG NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+ARG NEXT_PUBLIC_WS_URL=ws://localhost:8000
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 RUN npm ci
 COPY . .
 RUN npm run build

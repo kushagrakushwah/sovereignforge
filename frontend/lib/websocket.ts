@@ -1,114 +1,168 @@
-// frontend/lib/websocket.ts
-// WebSocket client hook for SovereignForge agent communication
+// WebSocket hooks for the agent stream and the sovereignty network monitor.
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { WS_URL } from "@/lib/config";
+import { isTerminal, type AgentEvent, type TraceEvent } from "@/lib/events";
 
-export interface AgentEvent {
-  type: string;
-  data: Record<string, unknown>;
-}
+export type { AgentEvent, TraceEvent } from "@/lib/events";
 
-export function useAgentWebSocket(backendUrl = "ws://localhost:8000") {
-  const wsRef = useRef<WebSocket | null>(null);
-  const [events, setEvents] = useState<AgentEvent[]>([]);
-  const [connected, setConnected] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
+const RECONNECT_MS = 3000;
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const ws = new WebSocket(`${backendUrl}/ws/agent`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnected(true);
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      setIsRunning(false);
-      // Auto-reconnect after 3 seconds
-      setTimeout(connect, 3000);
-    };
-
-    ws.onerror = () => {
-      setConnected(false);
-    };
-
-    ws.onmessage = (msg: MessageEvent) => {
-      try {
-        const event: AgentEvent = JSON.parse(msg.data);
-
-        if (event.type === "token_chunk") {
-          // Accumulate tokens into the last "streaming_thought" event instead of adding new entries
-          setEvents((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.type === "streaming_thought") {
-              const updated = {
-                ...last,
-                data: {
-                  ...last.data,
-                  text: (String(last.data.text ?? "")) + String(event.data.token ?? ""),
-                },
-              };
-              return [...prev.slice(0, -1), updated];
-            }
-            // Start new streaming thought entry
-            return [
-              ...prev,
-              {
-                type: "streaming_thought",
-                data: { text: String(event.data.token ?? ""), iteration: event.data.iteration },
-              },
-            ];
-          });
-          return;
-        }
-
-        setEvents((prev) => [...prev, event]);
-
-        if (
-          event.type === "finish" ||
-          event.type === "error" ||
-          event.type === "max_iterations"
-        ) {
-          setIsRunning(false);
-        }
-      } catch {
-        console.error("Failed to parse WebSocket message:", msg.data);
-      }
-    };
-  }, [backendUrl]);
+/**
+ * Opens `url`, reconnecting on close until the owning component unmounts.
+ * Handlers are read through a ref so callers can pass inline functions.
+ */
+function useReconnectingSocket(
+  url: string,
+  handlers: {
+    onOpen?: () => void;
+    onClose?: () => void;
+    onMessage: (data: unknown) => void;
+  },
+) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const handlersRef = useRef(handlers);
 
   useEffect(() => {
+    handlersRef.current = handlers;
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const connect = () => {
+      const ws = new WebSocket(url);
+      socketRef.current = ws;
+      ws.onopen = () => handlersRef.current.onOpen?.();
+      ws.onmessage = (msg: MessageEvent) => {
+        try {
+          handlersRef.current.onMessage(JSON.parse(msg.data));
+        } catch {
+          console.error("Unparseable socket message", msg.data);
+        }
+      };
+      ws.onclose = () => {
+        if (disposed) return;
+        handlersRef.current.onClose?.();
+        timer = setTimeout(connect, RECONNECT_MS);
+      };
+    };
+
     connect();
     return () => {
-      wsRef.current?.close();
+      disposed = true;
+      clearTimeout(timer);
+      socketRef.current?.close();
+      socketRef.current = null;
     };
-  }, [connect]);
+  }, [url]);
+
+  return socketRef;
+}
+
+export function useAgentWebSocket(baseUrl = WS_URL) {
+  const [events, setEvents] = useState<TraceEvent[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+
+  const nextId = useRef(0);
+  const started = useRef(false);
+  const tokenBuffer = useRef<{ text: string; iteration: unknown } | null>(null);
+  const frame = useRef<number | null>(null);
+
+  // Tokens arrive far faster than the screen refreshes; fold them in once per frame.
+  const flushTokens = useCallback(() => {
+    frame.current = null;
+    const buffered = tokenBuffer.current;
+    tokenBuffer.current = null;
+    if (!buffered) return;
+    setEvents((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.type === "streaming_thought") {
+        const text = String(last.data.text ?? "") + buffered.text;
+        return [...prev.slice(0, -1), { ...last, data: { ...last.data, text } }];
+      }
+      return [
+        ...prev,
+        {
+          id: nextId.current++,
+          at: Date.now(),
+          type: "streaming_thought",
+          data: { text: buffered.text, iteration: buffered.iteration },
+        },
+      ];
+    });
+  }, []);
+
+  const handleMessage = (raw: unknown) => {
+    const event = raw as AgentEvent;
+
+    if (event.type === "token_chunk") {
+      const token = String(event.data.token ?? "");
+      tokenBuffer.current = {
+        text: (tokenBuffer.current?.text ?? "") + token,
+        iteration: event.data.iteration,
+      };
+      frame.current ??= requestAnimationFrame(flushTokens);
+      return;
+    }
+
+    // Keep ordering: any buffered tokens belong before this event.
+    if (frame.current !== null) {
+      cancelAnimationFrame(frame.current);
+      flushTokens();
+    }
+
+    if (event.type === "agent_start") started.current = true;
+    const stamped: TraceEvent = { ...event, id: nextId.current++, at: Date.now() };
+    setEvents((prev) => [...prev, stamped]);
+    if (isTerminal(event, started.current)) setIsRunning(false);
+  };
+
+  const socket = useReconnectingSocket(`${baseUrl}/ws/agent`, {
+    onOpen: () => setConnected(true),
+    onClose: () => {
+      setConnected(false);
+      setIsRunning(false);
+    },
+    onMessage: handleMessage,
+  });
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    },
+    [],
+  );
 
   const sendTask = useCallback(
     (userInput: string, filePath?: string) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        console.error("WebSocket not connected");
-        return;
-      }
+      const ws = socket.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      started.current = false;
+      tokenBuffer.current = null;
       setEvents([]);
       setIsRunning(true);
-      wsRef.current.send(
-        JSON.stringify({
-          user_input: userInput,
-          file_path: filePath ?? null,
-        })
-      );
+      setStartedAt(Date.now());
+      ws.send(JSON.stringify({ user_input: userInput, file_path: filePath ?? null }));
+      return true;
     },
-    []
+    [socket],
   );
 
-  return { events, connected, isRunning, sendTask };
+  const reset = useCallback(() => {
+    if (isRunning) return;
+    setEvents([]);
+    setStartedAt(null);
+  }, [isRunning]);
+
+  return { events, connected, isRunning, startedAt, sendTask, reset };
 }
 
-// ── Network Monitor WebSocket Hook ──
+// ── Network monitor ─────────────────────────────────────────────────────────
+
 export interface NetworkEntry {
   timestamp: string;
   method: string;
@@ -124,38 +178,24 @@ export interface NetworkStatus {
   total: number;
   external_blocked: number;
   sovereign: boolean;
+  connected: boolean;
 }
 
-export function useNetworkMonitor(backendUrl = "ws://localhost:8000") {
-  const wsRef = useRef<WebSocket | null>(null);
+export function useNetworkMonitor(baseUrl = WS_URL) {
   const [status, setStatus] = useState<NetworkStatus>({
     entries: [],
     total: 0,
     external_blocked: 0,
     sovereign: true,
+    connected: false,
   });
 
-  useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(`${backendUrl}/ws/network`);
-      wsRef.current = ws;
-
-      ws.onmessage = (msg: MessageEvent) => {
-        try {
-          setStatus(JSON.parse(msg.data));
-        } catch {
-          // ignore parse errors
-        }
-      };
-
-      ws.onclose = () => {
-        setTimeout(connect, 3000);
-      };
-    };
-
-    connect();
-    return () => wsRef.current?.close();
-  }, [backendUrl]);
+  useReconnectingSocket(`${baseUrl}/ws/network`, {
+    onOpen: () => setStatus((s) => ({ ...s, connected: true })),
+    onClose: () => setStatus((s) => ({ ...s, connected: false })),
+    onMessage: (data) =>
+      setStatus({ ...(data as Omit<NetworkStatus, "connected">), connected: true }),
+  });
 
   return status;
 }
