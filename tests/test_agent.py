@@ -122,9 +122,10 @@ class TestAgentEventTypes:
         from agent.loop import run_agent
 
         pdf = allowed_path("test.pdf")
+        pdf_path_str = Path(pdf).as_posix()
         ocr_call = (
             '{"thought": "need to OCR", "action": "ocr", '
-            f'"action_input": {{"file_path": "{pdf}"}}, "observation": null}}'
+            f'"action_input": {{"file_path": "{pdf_path_str}"}}, "observation": null}}'
         )
         mock_ocr = AsyncMock(return_value={"success": True, "text": "Sample text", "pages": 1, "error": None})
 
@@ -146,7 +147,7 @@ class TestAgentEventTypes:
 
         types = [e.type for e in events]
         assert types.index("tool_call") < types.index("tool_result") < types.index("finish")
-        mock_ocr.assert_awaited_once_with(file_path=pdf)
+        mock_ocr.assert_awaited_once_with(file_path=pdf_path_str)
         # Second LLM turn must include the tool output as a user message
         assert "Sample text" in seen_prompts[1][-1]["content"]
         assert seen_prompts[1][-2]["role"] == "assistant"
@@ -178,9 +179,10 @@ class TestAgentEventTypes:
         from config import MAX_AGENT_ITERATIONS
 
         pdf = allowed_path("x.pdf")
+        pdf_path_str = Path(pdf).as_posix()
         call = (
             '{"thought": "still thinking", "action": "ocr", '
-            f'"action_input": {{"file_path": "{pdf}"}}, "observation": null}}'
+            f'"action_input": {{"file_path": "{pdf_path_str}"}}, "observation": null}}'
         )
         mock_ocr = AsyncMock(return_value={"success": True, "text": "text", "pages": 1, "error": None})
 
